@@ -1,0 +1,19 @@
+name: Idea or new tool
+description: Suggest a change to a tool, or a new tool
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Tool
+      options:
+        - update_all_check_first
+        - New tool
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+    validations:
+      required: true

@@ -1,0 +1,3 @@
+# Files this tool installs, relative to /media/fat (one per line)
+Scripts/update_all_check_first.sh
+Scripts/.config/update_all_check_first/ucf.py

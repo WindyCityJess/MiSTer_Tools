@@ -4,3 +4,4 @@ __pycache__/
 blocked.json
 history.log
 deferred.json
+dist/

@@ -1,0 +1,28 @@
+name: Bug report
+description: Something in one of the tools does not work
+labels: [bug]
+body:
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Tool
+      options:
+        - update_all_check_first
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output or logs
+      description: For update_all_check_first, `python3 /media/fat/Scripts/.config/update_all_check_first/ucf.py --report` and history.log help.
+      render: text
