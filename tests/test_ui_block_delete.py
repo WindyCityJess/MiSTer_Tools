@@ -19,6 +19,7 @@ ucf.MAIN_INI = WORK + '/test_downloader.ini'
 ucf.CONF_DIR = WORK + '/conf'
 ucf.STATE = WORK + '/conf/blocked.json'
 ucf.HISTORY = WORK + '/conf/history.log'
+ucf.DEFERRED = WORK + '/conf/deferred.json'
 shutil.rmtree(ucf.CONF_DIR, ignore_errors=True)
 FAKE = WORK + '/fakefat'
 shutil.rmtree(FAKE, ignore_errors=True)

@@ -3,3 +3,4 @@ __pycache__/
 *.bak_ucf_*
 blocked.json
 history.log
+deferred.json

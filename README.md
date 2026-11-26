@@ -1,8 +1,8 @@
 # update_all_check_first
 
 A copy of the MiSTer [Update All](https://github.com/theypsilon/Update_All_MiSTer) launcher with a review step
-added in front of it. You choose which **new cores and scripts** get installed. Anything you don't pick is added
-to the `downloader.ini` filter so it never shows up again.
+added in front of it. You choose what happens to each **new core and script**: install it, block it (added to
+the `downloader.ini` filter so it never shows up again), or defer it (not installed now, asked again next run).
 
 ## What it does
 
@@ -15,12 +15,23 @@ result with Downloader's record of what is installed (`Scripts/.config/downloade
 | Updates to installed files | install automatically |
 | New dated versions of installed cores (`Foo_20261114.rbf`) | install automatically |
 | New extras: wallpapers, MGLs, manuals, BIOS, docs… | install automatically |
-| New cores (Console / Computer / Arcade / Other / Utility) | **need approval**: install or block |
-| New scripts (`Scripts/…`) | **need approval**: install or block |
+| New cores (Console / Computer / Arcade / Other / Utility) | **need approval**: install, block or defer |
+| New scripts (`Scripts/…`) | **need approval**: install, block or defer |
 | New content whose tags are all shared with installed files | warning; installs unless you pick **Block + delete** |
 
-Arcade items are grouped by the core they run on. Every new item ends up either **installed** or **blocked**.
+Arcade items are grouped by the core they run on. Every new item is **installed**, **blocked** or **deferred**.
 Blocked items are written to the `[MiSTer]` `filter =` line as `!term` and won't be offered again.
+
+### How Defer works
+
+Downloader installs everything the filter doesn't exclude, so an item can't just be left out of both lists.
+A deferred item's `!term` is added to the filter **for this run only**. When Update All finishes, the launcher
+runs `ucf.py --release-deferred`, which takes the term back out. Nothing was installed for it, so nothing is
+deleted, and the item shows up as new again next time. If the release never runs (reboot, power loss), the
+next run of the script releases it before checking. Running plain Update All or Downloader in between keeps the
+deferred items out until then.
+
+Shared-tag content (below) can't be deferred: filtering it even for one run would delete the installed files.
 
 ### Why some content can't simply be blocked
 
@@ -33,12 +44,15 @@ installed file that would be removed, asks you to confirm (default **No**), dele
 
 All menus use `dialog` and work with arrows, Enter and Esc, so a controller can drive them. Enter switches an item.
 
-- **Categories:** install all / block all, or switch items one at a time (`[X]` = install, `[ ]` = block)
+- **Categories:** install all / block all / defer all, or switch items one at a time (Enter cycles
+  `[Install]` → `[Block]` → `[Defer]`)
+- **Main menu `*`, `/`, `~`:** install, block or defer every new core and script at once
 - **W – Shared-tag content:** install (default) or block + delete
-- **F – Add to filter:** review everything that will be blocked; switch any back to install
+- **F – Add to filter:** review everything that will be blocked; switch any to install or defer
 - **A – Show automatic changes:** updates, new versions, extras, warnings
 - **U – Unblock:** removes a term this script added
-- **G – Continue:** confirm screen, then the filter is written, deletions are made, the run is logged and Update All starts
+- **G – Continue:** confirm screen, then the filter is written, deletions are made, the run is logged and Update All
+  starts; deferred terms are removed again when it finishes
 - **X – Exit:** nothing is installed, blocked or deleted, and Update All does not run
 
 If the check fails (no network, broken database list, missing helper), Update All is **not** run, so nothing
@@ -68,7 +82,9 @@ Requires `python3` and `dialog` (both included in MiSTer Linux).
   that database has one without `[mister]`). A backup `downloader.ini.bak_ucf_<timestamp>` is made before every
   write, and the 10 newest are kept.
 - `Scripts/.config/update_all_check_first/blocked.json`: what this script blocked (used by the Unblock menu)
-- `Scripts/.config/update_all_check_first/history.log`: installs, blocks and deleted files per run
+- `Scripts/.config/update_all_check_first/deferred.json`: deferred terms waiting to be released (only exists
+  while Update All runs, or if a release was missed)
+- `Scripts/.config/update_all_check_first/history.log`: installs, blocks, deferrals and deleted files per run
 
 ## Notes and limits
 
@@ -80,8 +96,9 @@ Requires `python3` and `dialog` (both included in MiSTer Linux).
 
 ## Tests
 
-`tests/` holds two scripted UI tests that fake every `dialog` call and write only to copies under `/tmp/ucf_test`.
-Run them on a MiSTer: `python3 tests/test_ui_block.py` and `python3 tests/test_ui_block_delete.py`.
+`tests/` holds three scripted UI tests that fake every `dialog` call and write only to copies under
+`/tmp/ucf_test`. Run them on a MiSTer: `python3 tests/test_ui_block.py`, `python3 tests/test_ui_block_delete.py`
+and `python3 tests/test_ui_defer.py`.
 
 ## Credits and license
 
@@ -90,3 +107,5 @@ The launcher is derived from `update_all.sh` from
 (© José Manuel Barroso Galindo), licensed GPL-3.0-or-later. The filter rules in `ucf.py` follow the behavior of
 [MiSTer-devel/Downloader_MiSTer](https://github.com/MiSTer-devel/Downloader_MiSTer).
 This project is licensed under the **GNU GPL v3.0 or later**; see `LICENSE`.
+
+This project was developed with the assistance of AI.

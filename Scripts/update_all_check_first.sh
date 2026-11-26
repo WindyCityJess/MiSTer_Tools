@@ -282,6 +282,13 @@ if [[ ${UA_RET} -eq 2 ]] && [ -s "${LATEST_TOOL_PATH}" ] ; then
     set -e
 fi
 
+# CHECK FIRST (added): take the deferred items back out of the filter so they are offered again
+# next run. Nothing was installed for them, so nothing is deleted. If this is skipped (reboot,
+# power loss), ucf.py releases them at the start of the next run.
+set +e
+python3 "${UCF_HELPER}" --release-deferred
+set -e
+
 if [[ ${UA_RET} -ne 0 ]] ; then
     echo -e "Update All failed!\n"
     exit 1

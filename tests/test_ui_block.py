@@ -1,6 +1,6 @@
 # Scripted UI test: fakes every dialog call and writes only to copies under /tmp/ucf_test.
 # Run on the MiSTer:  python3 tests/test_ui_block.py   (set UCF_DIR if ucf.py is elsewhere)
-# Flow: continue past the warning (if shown) -> Computer: install all, untick #1 -> view automatic
+# Flow: continue past the warning (if shown) -> Computer: install all, switch #1 to block -> view automatic
 # changes -> filter menu: switch the first blocked item to install -> continue + confirm.
 # Needs at least one new Computer core in the current databases.
 import configparser
@@ -20,6 +20,7 @@ ucf.MAIN_INI = WORK + '/test_downloader.ini'
 ucf.CONF_DIR = WORK + '/conf'
 ucf.STATE = WORK + '/conf/blocked.json'
 ucf.HISTORY = WORK + '/conf/history.log'
+ucf.DEFERRED = WORK + '/conf/deferred.json'
 shutil.rmtree(ucf.CONF_DIR, ignore_errors=True)
 
 
@@ -33,7 +34,7 @@ BEFORE = len(filter_terms())
 script = [
     ('--menu', 0, '2'), ('--menu', 0, '+'), ('--menu', 0, '1'), ('--menu', 0, 'D'),
     ('--menu', 0, 'A'), ('--textbox', 0, ''),
-    ('--menu', 0, 'F'), ('--menu', 0, '1'), ('--menu', 1, ''),
+    ('--menu', 0, 'F'), ('--menu', 0, '1'), ('--menu', 0, 'I'), ('--menu', 1, ''),
     ('--menu', 0, 'G'), ('--yesno', 0, ''),
 ]
 log = []

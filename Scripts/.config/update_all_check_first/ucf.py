@@ -8,15 +8,17 @@
 #     BIOS, docs...) .................................. install automatically
 #   - new cores (console/computer/arcade/other/utility)
 #     and new scripts ................................. need approval
-# Every new core/script is either INSTALLED or BLOCKED (added to the downloader.ini filter
-# so it never shows again). Nothing is skipped "for now".
+# Every new core/script is INSTALLED, BLOCKED (added to the downloader.ini filter so it never
+# shows again) or DEFERRED (filtered for this run only: the term is removed again after Update
+# All finishes, so the item is offered again next time).
 #
 # Safety: a filter term is only offered for blocking when NO installed file carries that tag,
 # because Downloader deletes installed files that a filter excludes.
 #
 # Exit codes: 0 = continue with Update All, 1 = user cancelled, 2 = error (do not update).
-# Usage: ucf.py            interactive (dialog menus)
-#        ucf.py --report   print the analysis only, change nothing
+# Usage: ucf.py                    interactive (dialog menus)
+#        ucf.py --report           print the analysis only, change nothing
+#        ucf.py --release-deferred remove this run's deferred terms (the launcher calls it after Update All)
 
 import concurrent.futures
 import configparser
@@ -40,6 +42,7 @@ STORE = BASE + '/Scripts/.config/downloader/downloader.json'
 CONF_DIR = BASE + '/Scripts/.config/update_all_check_first'
 STATE = CONF_DIR + '/blocked.json'
 HISTORY = CONF_DIR + '/history.log'
+DEFERRED = CONF_DIR + '/deferred.json'  # terms filtered for the current run only
 CACHE = '/tmp/ucf_cache'
 CERTS = [os.environ.get('SSL_CERT_FILE', ''), BASE + '/Scripts/.config/downloader/cacert.pem',
          '/etc/ssl/certs/cacert.pem']
@@ -426,7 +429,7 @@ def analyze(progress=print):
         it['category'] = categorize(it['paths'])
         it['label'] = label_for(it['term'], it['paths'])
         it['all_tag_paths'] = coverage[(it['scope'], it['term'])]
-        it['selected'] = False
+        it['action'] = 'block'  # 'install' | 'block' | 'defer'
         (review if it['category'] else auto_items).append(it)
     for it in auto_items:
         for p in it['paths']:
@@ -446,7 +449,7 @@ def analyze(progress=print):
         best = min(cands, key=lambda t: (len(installed_by_tag.get((scope, t), ())),
                                          -len(coverage.get((scope, t), ())), t))
         it = shared.setdefault((scope, best), {'scope': scope, 'term': best, 'paths': [], 'dbs': set(),
-                                              'db_meta': db, 'shared': True, 'selected': True})
+                                              'db_meta': db, 'shared': True, 'action': 'install'})
         it['paths'].append(p)
         it['dbs'].add(db['section'])
     shared_items = []
@@ -471,11 +474,15 @@ def all_items(a):
     return a['review'] + a['shared']
 
 
+def by_action(a, action):
+    return [i for i in all_items(a) if i['action'] == action]
+
+
 def conflicts(a):
-    """Selected items whose files would be removed by a term we are about to block."""
-    blocked = [i for i in all_items(a) if not i['selected']]
+    """Items to install whose files would be filtered by a term we are about to block or defer."""
+    blocked = [i for i in all_items(a) if i['action'] != 'install']
     out = []
-    for keep in [i for i in all_items(a) if i['selected']]:
+    for keep in by_action(a, 'install'):
         for b in blocked:
             if b['scope'] != keep['scope']:
                 continue
@@ -509,14 +516,22 @@ def delete_installed(it):
 
 
 def apply_blocks(a):
-    blocked = [i for i in all_items(a) if not i['selected']]
+    blocked = by_action(a, 'block')
+    deferred = by_action(a, 'defer')
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    os.makedirs(CONF_DIR, exist_ok=True)
+    # Record deferred terms BEFORE writing them, so an interrupted run can still release them.
+    if deferred:
+        pending = load_deferred()
+        for it in deferred:
+            path, section = scope_location(it)
+            pending.append({'term': it['term'], 'ini': path, 'section': section, 'label': it['label']})
+        save_json(DEFERRED, pending)
     by_loc = {}
-    for it in blocked:
+    for it in blocked + deferred:
         by_loc.setdefault(scope_location(it), []).append(it['term'])
     for (path, section), terms in by_loc.items():
         add_filter_terms(path, section, sorted(set(terms)))
-    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-    os.makedirs(CONF_DIR, exist_ok=True)
     deletions = []
     for it in blocked:
         if it.get('shared'):
@@ -533,8 +548,9 @@ def apply_blocks(a):
                                                      'deleted_files': it.get('deleted', 0)}
     save_state(state)
     with open(HISTORY, 'a', encoding='utf-8') as f:
-        f.write('%s  installed: %s\n' % (now, ', '.join(i['label'] for i in all_items(a) if i['selected']) or '-'))
+        f.write('%s  installed: %s\n' % (now, ', '.join(i['label'] for i in by_action(a, 'install')) or '-'))
         f.write('%s  blocked:   %s\n' % (now, ', '.join('%s [!%s]' % (i['label'], i['term']) for i in blocked) or '-'))
+        f.write('%s  deferred:  %s\n' % (now, ', '.join('%s [!%s]' % (i['label'], i['term']) for i in deferred) or '-'))
         for it, deleted, failed in deletions:
             f.write('%s  deleted for !%s: %d files\n' % (now, it['term'], len(deleted)))
             for p in deleted:
@@ -553,9 +569,55 @@ def load_state():
 
 
 def save_state(state):
+    save_json(STATE, state)
+
+
+def save_json(path, data):
     os.makedirs(CONF_DIR, exist_ok=True)
-    with open(STATE, 'w', encoding='utf-8') as f:
-        json.dump(state, f, indent=2, sort_keys=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def load_deferred():
+    try:
+        with open(DEFERRED, encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def release_deferred():
+    """Remove the temporary deferred terms from the filter. Nothing was installed for them, so
+    nothing is deleted; the items show up as new again next run. Returns the number of failures."""
+    pending = load_deferred()
+    if not pending:
+        return 0
+    by_loc, failed = {}, []
+    for e in pending:
+        by_loc.setdefault((e['ini'], e['section']), []).append(e)
+    for (path, section), entries in by_loc.items():
+        try:
+            remove_filter_terms(path, section, [e['term'] for e in entries])
+        except Exception as ex:  # keep it in the file so the next run retries
+            print('WARNING: could not release deferred terms in %s [%s]: %s' % (path, section, ex))
+            failed += entries
+    if failed:
+        save_json(DEFERRED, failed)
+    else:
+        os.remove(DEFERRED)
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    released = [e for e in pending if e not in failed]
+    if released:
+        with open(HISTORY, 'a', encoding='utf-8') as f:
+            f.write('%s  released deferred: %s\n' % (now, ', '.join('%s [!%s]' % (e['label'], e['term'])
+                                                                       for e in released)))
+    subprocess.run(['sync'])
+    return len(failed)
 
 
 # ---------------------------------------------------------------- dialog UI
@@ -596,30 +658,36 @@ def textbox(title, text):
     os.remove(name)
 
 
+MARKS = {'install': '[Install]', 'block': '[Block]  ', 'defer': '[Defer]  '}
+NEXT_ACTION = {'install': 'block', 'block': 'defer', 'defer': 'install'}
+BULK_KEYS = {'+': 'install', '-': 'block', '~': 'defer'}
+
+
 def mark(it):
-    return '[X]' if it['selected'] else '[ ]'
+    return MARKS[it['action']]
 
 
 def category_menu(a, cat):
     items = [i for i in a['review'] if i['category'] == cat]
     cursor = None
     while True:
-        entries = [('+', 'Install ALL %s' % cat), ('-', 'Block ALL %s' % cat)]
+        entries = [('+', 'Install ALL %s' % cat), ('-', 'Block ALL %s' % cat), ('~', 'Defer ALL %s' % cat)]
         for n, it in enumerate(items):
             entries.append((str(n + 1), '%s %s  {%s}' % (mark(it), it['label'], ', '.join(sorted(it['dbs'])))))
         entries.append(('D', 'Done'))
         choice = menu('%s - new' % cat,
-                      '[X] = install    [ ] = block (added to the downloader.ini filter)\n'
-                      'Press Enter on an item to switch it.', entries, default=cursor)
+                      'Install = download now    Block = add to the downloader.ini filter for good\n'
+                      'Defer = not now, ask again next run\n'
+                      'Press Enter on an item to switch it: Install -> Block -> Defer.', entries, default=cursor)
         if choice is None or choice == 'D':
             return
         cursor = choice
-        if choice in '+-':
+        if choice in BULK_KEYS:
             for it in items:
-                it['selected'] = choice == '+'
+                it['action'] = BULK_KEYS[choice]
         else:
             it = items[int(choice) - 1]
-            it['selected'] = not it['selected']
+            it['action'] = NEXT_ACTION[it['action']]
 
 
 def summary_text(a):
@@ -694,20 +762,26 @@ def unblock_menu():
 
 
 def filter_menu(a):
-    """The 'add to filter' menu: everything not selected for install gets blocked."""
+    """The 'add to filter' menu: review everything set to block; switch any to install or defer."""
     while True:
-        blocked = [i for i in a['review'] if not i['selected']]
+        blocked = [i for i in a['review'] if i['action'] == 'block']
         if not blocked:
-            msgbox('Add to filter', 'Every new core/script is set to INSTALL - nothing will be added to the filter.')
+            msgbox('Add to filter', 'No new core/script is set to BLOCK - nothing will be added to the filter for good.')
             return
         entries = [(str(n + 1), '%-9s %s  -> !%s' % (it['category'], it['label'], it['term']))
                    for n, it in enumerate(blocked)]
         choice = menu('Add to filter (%d)' % len(blocked),
                       'These will be added to the downloader.ini filter when you continue,\n'
-                      'so they never show again. Press Enter on one to INSTALL it instead.', entries)
+                      'so they never show again. Press Enter on one to change it.', entries)
         if choice is None:
             return
-        blocked[int(choice) - 1]['selected'] = True
+        it = blocked[int(choice) - 1]
+        act = menu(it['label'], 'What should happen to %s?' % it['label'],
+                   [('I', 'Install it'), ('L', 'Defer it - ask again next run'), ('B', 'Keep it blocked')])
+        if act == 'I':
+            it['action'] = 'install'
+        elif act == 'L':
+            it['action'] = 'defer'
 
 
 def shared_menu(a):
@@ -717,19 +791,20 @@ def shared_menu(a):
     while True:
         entries = []
         for n, it in enumerate(items):
-            state = 'INSTALL' if it['selected'] else 'BLOCK + DELETE %d' % len(it['installed'])
+            state = 'INSTALL' if it['action'] == 'install' else 'BLOCK + DELETE %d' % len(it['installed'])
             entries.append((str(n + 1), '%-18s %s  (!%s)' % (state, it['label'], it['term'])))
         entries.append(('D', 'Done'))
         choice = menu('Shared-tag content (%d)' % len(items),
                       'These share their tag with files you already have, so blocking them\n'
-                      'also DELETES those installed files. Enter switches install / block + delete.',
+                      'also DELETES those installed files. Enter switches install / block + delete.\n'
+                      '(Defer is not possible here: filtering them even for one run deletes those files.)',
                       entries, default=cursor)
         if choice is None or choice == 'D':
             return
         cursor = choice
         it = items[int(choice) - 1]
-        if not it['selected']:
-            it['selected'] = True
+        if it['action'] != 'install':
+            it['action'] = 'install'
             continue
         listing = ['  ' + p for p in it['installed'][:15]]
         if len(it['installed']) > 15:
@@ -741,21 +816,23 @@ def shared_menu(a):
                  'Block and delete?' % (it['term'], len(it['installed']), '\n'.join(listing) or '  (none)',
                                         len(it['paths'])),
                  default_no=True, yes='Delete', no='Keep'):
-            it['selected'] = False
+            it['action'] = 'block'
 
 
 def confirm_and_apply(a):
     hits = conflicts(a)
     if hits:
-        lines = ['These selections clash - a blocked tag also covers files of an installed item:', '']
+        lines = ['These selections clash - a blocked/deferred tag also covers files of an installed item:', '']
         for keep, b, paths in hits[:12]:
-            lines.append('%s  <-  blocking !%s (%s)' % (keep['label'], b['term'], b['label']))
-        lines += ['', 'Install both, or block both, then try again.']
+            lines.append('%s  <-  %s !%s (%s)' % (keep['label'], 'deferring' if b['action'] == 'defer' else 'blocking',
+                                                  b['term'], b['label']))
+        lines += ['', 'Give both the same choice, then try again.']
         msgbox('Conflict', '\n'.join(lines))
         return False
-    inst = [i for i in all_items(a) if i['selected']]
-    blk = [i for i in a['review'] if not i['selected']]
-    dele = [i for i in a['shared'] if not i['selected']]
+    inst = by_action(a, 'install')
+    blk = [i for i in a['review'] if i['action'] == 'block']
+    dfr = [i for i in a['review'] if i['action'] == 'defer']
+    dele = [i for i in a['shared'] if i['action'] == 'block']
     text = ['INSTALL (%d):' % len(inst)] + ['  %s: %s' % (i['category'], i['label']) for i in inst[:20]]
     if len(inst) > 20:
         text.append('  ... and %d more' % (len(inst) - 20))
@@ -763,6 +840,11 @@ def confirm_and_apply(a):
     text += ['  %s: %s' % (i['category'], i['label']) for i in blk[:20]]
     if len(blk) > 20:
         text.append('  ... and %d more' % (len(blk) - 20))
+    if dfr:
+        text += ['', 'DEFER - not installed, asked again next run (%d):' % len(dfr)]
+        text += ['  %s: %s' % (i['category'], i['label']) for i in dfr[:20]]
+        if len(dfr) > 20:
+            text.append('  ... and %d more' % (len(dfr) - 20))
     if dele:
         text += ['', 'BLOCK + DELETE installed files (%d):' % len(dele)]
         text += ['  %s: %s - deletes %d files' % (i['category'], i['label'], len(i['installed'])) for i in dele]
@@ -780,6 +862,13 @@ def confirm_and_apply(a):
 
 def run_ui():
     os.system('clear')
+    # Items deferred last time are still filtered if Update All was interrupted (or rebooted)
+    # before the launcher could release them: release them first so they are offered again.
+    if load_deferred():
+        print('Releasing items deferred last run...', flush=True)
+        if release_deferred():
+            msgbox('Deferred items', 'Some deferred items could not be released from the filter.\n'
+                   'They stay hidden this run; see %s.' % DEFERRED)
     a = analyze(progress=lambda s: print(s, flush=True))
     if a['errors'] and not yesno('Some databases could not be checked',
                                  'Could not check:\n  ' + '\n  '.join(a['errors'][:10]) +
@@ -804,17 +893,19 @@ def run_ui():
         for cat in CATEGORY_ORDER:
             its = [i for i in a['review'] if i['category'] == cat]
             if its:
-                sel = sum(1 for i in its if i['selected'])
+                n = {k: sum(1 for i in its if i['action'] == k) for k in MARKS}
                 note = ' (scripts need approval)' if cat == 'Scripts' else ''
                 entries.append((str(CATEGORY_ORDER.index(cat) + 1),
-                                '%-9s %3d new   %3d to install%s' % (cat, len(its), sel, note)))
+                                '%-9s %3d new: %3d install %3d block %3d defer%s' % (
+                                    cat, len(its), n['install'], n['block'], n['defer'], note)))
         if a['shared']:
-            ndel = sum(1 for i in a['shared'] if not i['selected'])
+            ndel = sum(1 for i in a['shared'] if i['action'] == 'block')
             entries.append(('W', 'Shared-tag content: %d new, %d set to block + delete' % (len(a['shared']), ndel)))
         if a['review']:
-            nblk = sum(1 for i in a['review'] if not i['selected'])
+            nblk = sum(1 for i in a['review'] if i['action'] == 'block')
             entries += [('*', 'Install ALL new cores + scripts'),
                         ('/', 'Block ALL new cores + scripts'),
+                        ('~', 'Defer ALL new cores + scripts (ask again next run)'),
                         ('F', 'Add to filter: %d will be blocked (review)' % nblk)]
         entries += [('A', 'Show automatic changes (%d)' % (len(a['updates']) + len(a['core_additions']) + len(a['auto_new']))),
                     ('U', 'Unblock a previously blocked core'),
@@ -822,7 +913,7 @@ def run_ui():
                     ('X', 'Exit without updating')]
         tags = {e[0]: e for e in entries}
         text = ('New items are NOT installed unless you pick them.\n'
-                'Anything not picked is added to the downloader.ini filter when you continue.')
+                'Block = added to the downloader.ini filter for good.  Defer = ask again next run.')
         if not a['review']:
             text = 'No new cores or scripts to approve.'
         choice = menu('New cores and scripts', text, entries, default=cursor, cancel='Exit')
@@ -836,9 +927,9 @@ def run_ui():
             category_menu(a, cat_by_key[choice])
         elif choice == 'W':
             shared_menu(a)
-        elif choice in ('*', '/'):
+        elif choice in ('*', '/', '~'):
             for i in a['review']:
-                i['selected'] = choice == '*'
+                i['action'] = {'*': 'install', '/': 'block', '~': 'defer'}[choice]
         elif choice == 'F':
             filter_menu(a)
         elif choice == 'A':
@@ -851,6 +942,10 @@ def run_ui():
 
 
 def report():
+    pending = load_deferred()
+    if pending:
+        print('NOTE: %d deferred term(s) are still in the filter (released at the next interactive run): %s'
+              % (len(pending), ', '.join('!' + e['term'] for e in pending)))
     a = analyze()
     print('Global filter terms: %d' % len((a['global_filter'] or '').split()))
     print('Databases: %d (errors: %d)' % (len(a['dbs']), len(a['errors'])))
@@ -878,6 +973,8 @@ def report():
 def main():
     if '--report' in sys.argv:
         return report()
+    if '--release-deferred' in sys.argv:
+        return 2 if release_deferred() else 0
     if not shutil.which('dialog'):
         print('dialog is not installed; cannot show the review menus.')
         return 2
